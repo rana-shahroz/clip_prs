@@ -6,3 +6,4 @@ from utils.pretrained import list_pretrained, list_pretrained_models_by_tag, lis
 from utils.tokenizer import SimpleTokenizer, tokenize, decode
 from utils.transform import image_transform, AugmentationCfg
 from utils.openai_templates import OPENAI_IMAGENET_TEMPLATES
+# from utils.dino import DinoVisionTransformer, vit_small, vit_base, vit_large, vit_giant2
