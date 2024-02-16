@@ -22,16 +22,17 @@ class PRSLogger(object):
 
     @torch.no_grad()
     def compute_attentions(self, ret):
-        bias_term = self.model.visual.transformer.resblocks[
-            self.current_layer
-        ].attn.out_proj.bias
-        self.current_layer += 1
-        return_value = ret[:, 0].detach().cpu()
-        self.attentions.append(
-            return_value
-            + bias_term[np.newaxis, np.newaxis, np.newaxis].cpu()
-            / (return_value.shape[1] * return_value.shape[2])
-        )  # [b, n, h, d]
+        # bias_term = self.model.visual.transformer.resblocks[
+        #     self.current_layer
+        # ].attn.out_proj.bias
+        # self.current_layer += 1
+        # return_value = ret[:, 0].detach().cpu()
+        # self.attentions.append(
+        #     return_value
+        #     + bias_term[np.newaxis, np.newaxis, np.newaxis].cpu()
+        #     / (return_value.shape[1] * return_value.shape[2])
+        # )  # [b, n, h, d]
+        self.attentions.append(ret[:,0].detach().cpu())
         return ret
 
     @torch.no_grad()
@@ -96,13 +97,13 @@ class PRSLogger(object):
             self.device
         )  # [b, l, n, h, d]
         self.mlps = torch.stack(self.mlps, axis=1).to(self.device)  # [b, l + 1, d]
-        projected_attentions = self._normalize_attentions()
-        projected_mlps = self._normalize_mlps()
+        # projected_attentions = self._normalize_attentions()
+        # projected_mlps = self._normalize_mlps()
         norm = representation.norm(dim=-1).detach()
         return (
-            projected_attentions
+            self.attentions
             / norm[:, np.newaxis, np.newaxis, np.newaxis, np.newaxis],
-            projected_mlps / norm[:, np.newaxis, np.newaxis],
+            self.mlps / norm[:, np.newaxis, np.newaxis],
         )
 
     def reinit(self):
@@ -128,3 +129,29 @@ def hook_prs_logger(model, device):
     model.hook_manager.register("visual.ln_post.mean", prs.log_post_ln_mean)
     model.hook_manager.register("visual.ln_post.sqrt_var", prs.log_post_ln_std)
     return prs
+
+
+def hook_prs_logger_dino(model, device) : 
+    prs = PRSLogger(model, device)
+    model.hook_manager.register(
+        "backbone.transformer.resblocks.*.after_attn", prs.compute_attentions
+    )
+    
+    model.hook_manager.register(
+        "backbone.transformer.resblocks.*.after_mlp", prs.compute_mlps
+    )
+    
+    # model.hook_manager.register(
+    #     "backbone.transformer.ln_pre_post", prs.compute_mlps
+    # )
+    
+    # model.hook_manager.register(
+    #     "backbone.transformer.ln_post.mean", prs.log_post_ln_mean
+    # )
+    
+    # model.hook_manager.register(
+    #     "backbone.transformer.ln_post.sqrt_var", prs.log_post_ln_std
+    # )
+    
+    return prs
+    

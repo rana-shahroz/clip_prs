@@ -7,14 +7,28 @@
 # # model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14_lc')
 # model, _, preprocess = create_model_and_transforms("ViT-H-14", pretrained="laion2b_s32b_b79k")
 # print(model)
-    
+
 import torch
 import torchvision
 from utils.factory import create_model_and_transforms, get_tokenizer
 import tqdm
 from utils.make_dino import dinov2_vitb14
+from utils.dinowrapper import DinoWrapper
 from enum import Enum
 from typing import Any, Dict, TypeVar, Optional
+from prs_hook import hook_prs_logger_dino
+import os
+import numpy as np
+import torch
+from PIL import Image
+import os.path
+import argparse
+from pathlib import Path
+
+from torch.utils.data import DataLoader
+import tqdm
+from prs_hook import hook_prs_logger
+from torchvision.datasets import CIFAR100, CIFAR10, ImageNet, ImageFolder
 
 
 class Summary(Enum):
@@ -79,66 +93,54 @@ def accuracy(output, target, topk=(1,)):
         return res
     
 
+output_dir = "./output_dir"
 
-
-model, _, preprocess = create_model_and_transforms('ViT-B-16', pretrained='laion2b_s34b_b88k')
-
-dino = dinov2_vitb14()
-dino.load_state_dict(torch.load("./dinovitb14.pt"))
-# print(dino)
+x, _, preprocess = create_model_and_transforms('ViT-B-16', pretrained='laion2b_s34b_b88k')
 device = "cuda:0"
-model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14_lc').to(device)
-# lin_head = lin_head.linear_head
+model = DinoWrapper().to(device)
+prs = hook_prs_logger_dino(model, device)
 
-# print(lin_head)
-# state_dict = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-# torch.save(state_dict.state_dict(), "./dinovitb14.pt")
-# print(state_dict)
-
-# print(dino)
-# # device = "cuda:0"
-# # dinov2_vitb14_lc = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14_lc')
 ds = torchvision.datasets.ImageNet(root='./imagenet', split="val", transform=preprocess)
-dataloader = torch.utils.data.DataLoader(ds, batch_size=100, shuffle=False, num_workers=10)
+dataloader = torch.utils.data.DataLoader(ds, batch_size=1, shuffle=False, num_workers=10)
 
-# # print(model)
-# # print("*********\n\n")
-# # print(dinov2_vitb14_lc)
-def run_validate(loader, base_progress=0):
+attention_results = []
+mlp_results = []
+cls_to_cls_results = []
+
+for i, (image, _) in enumerate(tqdm.tqdm(dataloader)):
     with torch.no_grad():
-        for i, (images, target) in enumerate(tqdm.tqdm((loader))):
-            # i = base_progress + i
-            # if args.gpu is not None and torch.cuda.is_available():
-            #     images = images.cuda(args.gpu, non_blocking=True)
-            # if torch.backends.mps.is_available():
-            #     images = images.to('mps')
-            #     target = target.to('mps')
-            # if torch.cuda.is_available():
-            #     target = target.cuda(args.gpu, non_blocking=True)
+        prs.reinit()
+        representation = model.encode_image(
+            image.to(device)
+        )['x_norm_clstoken']
+        attentions, mlps = prs.finalize(representation)
+        attentions = attentions.detach().cpu().numpy()  # [b, l, n, h, d]
+        mlps = mlps.detach().cpu().numpy()  # [b, l+1, d]
+        attention_results.append(
+            np.sum(attentions, axis=2)
+        )  # Reduce the spatial dimension
+        mlp_results.append(mlps)
+        cls_to_cls_results.append(
+            np.sum(attentions[:, :, 0], axis=2)
+        )  # Store the cls->cls attention, reduce the heads
+        
+        break 
 
-            # compute output
-            images = images.to(device)
-            target = target.to(device)
-            output = model(images)
-            loss = criterion(output, target)
+print(representation.shape)
+print(attentions.sum(axis = (1,2, 3)).shape)
+print(mlps.sum(axis=1).shape)    
+rep2 = attentions + mlps 
 
-            # measure accuracy and record loss
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            top1.update(acc1[0].item(), images.size(0))
-            top5.update(acc5[0].item(), images.size(0))
-
-top1 = AverageMeter('Acc@1', ':6.2f', Summary.AVERAGE)
-top5 = AverageMeter('Acc@5', ':6.2f', Summary.AVERAGE)
-model.eval()
-criterion = torch.nn.CrossEntropyLoss().to(device)
-run_validate(dataloader)
-
-print(top1.summary())
-print(top5.summary())
-# # print(model)
-# # print(dinov2_vitb14_lc)
-# print(representation.shape)
-# print(representation)
-# print(rep1.shape)
-# print(rep1)
-# print(dinov2_vitb14_lc)
+print(representation.detach().cpu() - torch.from_numpy(rep2))
+with open(
+    os.path.join(output_dir, f"dino_attn.npy"), "wb"
+) as f:
+    np.save(f, np.concatenate(attention_results, axis=0))
+with open(
+    os.path.join(output_dir, f"dino_mlp.npy"), "wb"
+) as f:
+    np.save(f, np.concatenate(mlp_results, axis=0))
+with open(
+    os.path.join(output_dir, f"dino_cls_attn.npy"), "wb"
+) as f:
+    np.save(f, np.concatenate(cls_to_cls_results, axis=0))

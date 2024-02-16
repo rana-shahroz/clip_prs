@@ -1,6 +1,6 @@
 from enum import Enum
-from typing import Union
-
+from typing import Union, Optional
+from utils.hook import HookManager
 import torch
 
 
@@ -61,6 +61,7 @@ def _make_dinov2_model(
     interpolate_offset: float = 0.1,
     pretrained: bool = True,
     weights: Union[Weights, str] = Weights.LVD142M,
+    hook: Optional[HookManager] = None,
     **kwargs,
 ):
     from .models import dino as vits
@@ -81,6 +82,7 @@ def _make_dinov2_model(
         num_register_tokens=num_register_tokens,
         interpolate_antialias=interpolate_antialias,
         interpolate_offset=interpolate_offset,
+        hook = hook.fork("transformer"),
     )
     vit_kwargs.update(**kwargs)
     model = vits.__dict__[arch_name](**vit_kwargs)

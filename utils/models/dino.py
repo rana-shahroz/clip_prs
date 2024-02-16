@@ -17,6 +17,58 @@ from enum import Enum
 from utils.hook import HookManager
 # from dinov2.layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
 
+class LayerNorm(nn.Module):
+    """Subclass torch's LayerNorm (with cast back to input dtype)."""
+
+    def __init__(
+        self,
+        normalized_shape,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
+        device=None,
+        dtype=None,
+        hook: Optional[HookManager] = None,
+    ):
+        super().__init__()
+        self.hook = hook or HookManager()
+        if isinstance(normalized_shape, numbers.Integral):
+            # mypy error: incompatible types in assignment
+            normalized_shape = (normalized_shape,)  # type: ignore[assignment]
+        self.normalized_shape = tuple(normalized_shape)  # type: ignore[arg-type]
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if self.elementwise_affine:
+            self.weight = torch.nn.Parameter(
+                torch.empty(
+                    self.normalized_shape,
+                )
+            )
+            self.bias = torch.nn.Parameter(
+                torch.empty(
+                    self.normalized_shape,
+                )
+            )
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def forward(self, x: torch.Tensor):
+        orig_type = x.dtype
+        assert self.normalized_shape == x.shape[-len(self.normalized_shape) :]
+        dims = [-(i + 1) for i in range(len(self.normalized_shape))]
+        mean = self.hook("mean", ret=x.mean(dim=dims, keepdim=True))
+        mean_x2 = (x**2).mean(dim=dims, keepdim=True)
+        var = mean_x2 - mean**2
+        x_norm = self.hook("mean_reduced", ret=(x - mean)) / self.hook(
+            "sqrt_var", ret=torch.sqrt(var + self.eps)
+        )
+        if self.elementwise_affine:
+            x_norm = self.hook("renorm.post", ret=self.weight * x_norm + self.bias)
+        self.hook.finalize()
+        return x_norm.to(orig_type)
+
+
+
 
 def make_2tuple(x) : 
     if isinstance(x, tuple) : 
@@ -306,7 +358,7 @@ class Block(nn.Module):
         
         self.hook = hook or HookManager()
         # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
-        self.norm1 = norm_layer(dim)
+        self.norm1 = norm_layer(dim, hook=hook.fork("ln_1"))
         self.attn = attn_class(
             dim,
             num_heads=num_heads,
@@ -314,11 +366,12 @@ class Block(nn.Module):
             proj_bias=proj_bias,
             attn_drop=attn_drop,
             proj_drop=drop,
+            hook=hook.fork("attn")
         )
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        self.norm2 = norm_layer(dim)
+        self.norm2 = norm_layer(dim, hook=hook.fork("ln_2"))
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = ffn_layer(
             in_features=dim,
@@ -326,6 +379,7 @@ class Block(nn.Module):
             act_layer=act_layer,
             drop=drop,
             bias=ffn_bias,
+            hook=hook.fork("mlp")
         )
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -555,6 +609,7 @@ class DinoVisionTransformer(nn.Module):
         num_register_tokens=0,
         interpolate_antialias=False,
         interpolate_offset=0.1,
+        hook = None, 
     ):
         """
         Args:
@@ -582,8 +637,8 @@ class DinoVisionTransformer(nn.Module):
             interpolate_offset: (float) work-around offset to apply when interpolating positional embeddings
         """
         super().__init__()
-        norm_layer = partial(nn.LayerNorm, eps=1e-6)
-
+        self.hook = hook  or HookManager()
+        norm_layer = partial(LayerNorm, eps=1e-6)
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.num_tokens = 1
         self.n_blocks = depth
@@ -636,9 +691,10 @@ class DinoVisionTransformer(nn.Module):
                 act_layer=act_layer,
                 ffn_layer=ffn_layer,
                 init_values=init_values,
+                hook = self.hook.fork(f"resblocks.{i}"), 
             )
             for i in range(depth)
-        ]
+        ]   
         if block_chunks > 0:
             self.chunked_blocks = True
             chunked_blocks = []
@@ -651,7 +707,7 @@ class DinoVisionTransformer(nn.Module):
             self.chunked_blocks = False
             self.blocks = nn.ModuleList(blocks_list)
 
-        self.norm = norm_layer(embed_dim)
+        self.norm = norm_layer(embed_dim, hook=self.hook.fork("ln_post"))
         self.head = nn.Identity()
 
         self.mask_token = nn.Parameter(torch.zeros(1, embed_dim))
@@ -737,6 +793,7 @@ class DinoVisionTransformer(nn.Module):
         return output
 
     def forward_features(self, x, masks=None):
+        x = self.hook("ln_pre_post", ret=x)
         if isinstance(x, list):
             return self.forward_features_list(x, masks)
 
@@ -746,6 +803,7 @@ class DinoVisionTransformer(nn.Module):
             x = blk(x)
 
         x_norm = self.norm(x)
+        self.hook.finalize()
         return {
             "x_norm_clstoken": x_norm[:, 0],
             "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],

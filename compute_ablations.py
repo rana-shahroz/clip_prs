@@ -38,6 +38,9 @@ def main(args):
     else:
         with open(os.path.join(args.input_dir, f'{args.dataset}_labels.npy'), 'rb') as f:
             labels = np.load(f)
+            
+    print(attns.sum(axis=(1,2)).shape)
+    print(mlps.sum(axis=1).shape)
     baseline = attns.sum(axis=(1,2)) + mlps.sum(axis=1)
     baseline_acc = accuracy(torch.from_numpy(baseline @ classifier).float(), 
                             torch.from_numpy(labels))[0]*100
