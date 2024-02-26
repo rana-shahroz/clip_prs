@@ -42,6 +42,10 @@ def main(args):
     print(attns.sum(axis=(1,2)).shape)
     print(mlps.sum(axis=1).shape)
     baseline = attns.sum(axis=(1,2)) + mlps.sum(axis=1)
+    
+    # Divide the bias term over all layers.
+    # Look at the code and pull from it, add the faster transformer thing.
+    
     baseline_acc = accuracy(torch.from_numpy(baseline @ classifier).float(), 
                             torch.from_numpy(labels))[0]*100
     print('Baseline:', baseline_acc)
